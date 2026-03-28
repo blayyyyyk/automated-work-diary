@@ -1,0 +1,4 @@
+browser_memory_db
+
+**/__pycache__
+.venv
