@@ -10,6 +10,7 @@ from sklearn.cluster import HDBSCAN, AgglomerativeClustering
 from collections import Counter, defaultdict
 import numpy as np
 
+# Rough idea of pipeline...
 # 1. Have the model describe each page based on the html content
 # 2. Record the following to an embedding database:
 #       - Summary
@@ -42,8 +43,16 @@ Intent: Page rendering and tracking metadata extraction\n\n
 
 """
 
-def remove_tags(html):
-
+def remove_tags(html: str) -> str:
+    """
+    Returns a webpages content, stripped of html tags and javascript code snippets.
+    
+    Args:
+        html (str): The raw html content of a webpage.
+        
+    Returns:
+        str: The webpages content, stripped of html tags and javascript code snippets.
+    """
     # parse html content
     soup = BeautifulSoup(html, "html.parser")
 
@@ -55,7 +64,19 @@ def remove_tags(html):
     return ' '.join(soup.stripped_strings)
 
 def update_all(collection, clusters_collection, distance_threshold=1.0):
-    # Retrieve all items to cluster them
+    """
+    Updates all items in the collection by clustering them and updating the clusters collection.
+    
+    Args:
+        collection: The collection of items to cluster.
+        clusters_collection: The collection of clusters to update.
+        distance_threshold (float): The distance threshold for clustering.
+        
+    Returns:
+        NoneType
+    """
+    
+    # retrieve all items to cluster them
     results = collection.get(include=['embeddings', 'metadatas'])
     if not results['ids']:
         return
@@ -64,7 +85,7 @@ def update_all(collection, clusters_collection, distance_threshold=1.0):
     ids = results['ids']
     metadatas = results['metadatas']
 
-    # Agglomerative clustering creates clusters dynamically based on distance limit
+    # agglomerative clustering creates clusters dynamically based on distance limit
     clustering = AgglomerativeClustering(
         n_clusters=None,
         distance_threshold=distance_threshold,
@@ -76,6 +97,7 @@ def update_all(collection, clusters_collection, distance_threshold=1.0):
     new_metadatas = []
     cluster_data = {}
 
+    # 
     for i, label in enumerate(labels):
         meta = metadatas[i] if metadatas[i] else {}
         meta['cluster_id'] = int(label)
@@ -85,10 +107,10 @@ def update_all(collection, clusters_collection, distance_threshold=1.0):
             cluster_data[label] = []
         cluster_data[label].append(embeddings[i])
 
-    # Update the main collection with assigned cluster_ids
+    # add cluster identifier to metadata of text embeddings
     collection.update(ids=ids, metadatas=new_metadatas)
 
-    # Rebuild the centroid clusters_collection entirely
+    # full refresh of centroids
     existing_clusters = clusters_collection.get()
     if existing_clusters['ids']:
         clusters_collection.delete(ids=existing_clusters['ids'])
@@ -98,9 +120,6 @@ def update_all(collection, clusters_collection, distance_threshold=1.0):
     for c_id, embs in cluster_data.items():
         cluster_ids.append(str(c_id))
         centroids.append(np.mean(embs, axis=0).tolist())
-
-    
-        
     
     clusters_collection.add(ids=cluster_ids, embeddings=centroids)
     
@@ -108,11 +127,11 @@ def update_all(collection, clusters_collection, distance_threshold=1.0):
 
 
 def update(collection, clusters_collection, embed_vector, embed_mdata, embed_text, distance_threshold=1.0):
-    new_id = str(uuid4())
+    new_id = str(uuid4()) # generate unique identifier
     existing_clusters = clusters_collection.get(include=['embeddings'])
     assigned_cluster_id = -1
 
-    # 1. Attempt to match with an existing centroid
+    # search for matching centroid / prexisting cluster
     if existing_clusters['ids']:
         res = clusters_collection.query(
             query_embeddings=[embed_vector.tolist() if isinstance(embed_vector, np.ndarray) else embed_vector],
@@ -124,8 +143,8 @@ def update(collection, clusters_collection, embed_vector, embed_mdata, embed_tex
                 assigned_cluster_id = int(res['ids'][0][0])
 
     embed_mdata['cluster_id'] = assigned_cluster_id
-
-    # 2. Add the new entry to the main collection
+    
+    # upsert to text embed collection
     collection.upsert(
         ids=[new_id],
         embeddings=[embed_vector],
@@ -133,8 +152,9 @@ def update(collection, clusters_collection, embed_vector, embed_mdata, embed_tex
         metadatas=[embed_mdata]
     )
 
-    # 3. If it didn't fit into an existing cluster, gather all -1s and recompute
+    # if new embedding is an outlier, compare it with other outliers, try to cluster it
     if assigned_cluster_id == -1:
+        # retreive all outlier embeds
         unclustered_res = collection.get(
             where={"cluster_id": -1},
             include=['embeddings', 'metadatas']
@@ -143,7 +163,7 @@ def update(collection, clusters_collection, embed_vector, embed_mdata, embed_tex
         unclustered_ids = unclustered_res['ids']
         unclustered_embs = unclustered_res['embeddings']
 
-        # Only re-cluster if we have at least 2 orphans to compare
+        # recluster if 2 or more outliers to compare
         if len(unclustered_ids) > 1:
             clustering = AgglomerativeClustering(
                 n_clusters=None,
@@ -168,10 +188,10 @@ def update(collection, clusters_collection, embed_vector, embed_mdata, embed_tex
                     new_centroids[new_global_label] = []
                 new_centroids[new_global_label].append(unclustered_embs[i])
 
-            # Update orphans in main collection
+            # update outlier metadata in text embed collection
             collection.update(ids=unclustered_ids, metadatas=new_metadatas)
 
-            # Add brand new centroids
+            # make new centroid and add it to the collection
             c_ids = []
             c_embs = []
             for c_id, embs in new_centroids.items():
@@ -244,7 +264,7 @@ def get_journal_timeframe(event_mdata):
     return journal_timeframe
         
 
-def summarize_clusters(collection):
+def generate_diary(collection):
     grouped_mdata = get_cluster_event_mdata(collection)
     
     texts = []
@@ -317,4 +337,4 @@ def get_page_summary(title, content):
 if __name__ == "__main__":
     chroma_client = chromadb.PersistentClient(path="./browser_memory_db")
     collection = chroma_client.get_or_create_collection(name="browser_events")
-    summarize_clusters(collection)
+    generate_diary(collection)
