@@ -23,9 +23,9 @@ import numpy as np
 LOCAL_LLM_URL = "http://localhost:11434/api/generate"
 LLM_MODEL = "llama3:8b"
 TIMESTAMP_FMT = "%m/%d/%Y %H:%M:%S"
-GENERAL_PROMPT = "Your job is to create diary entries describing a user's workflow on their desktop."
+JOURNAL_PATH = "journal.md"
 
-EVENTS_PROMPT = f"""
+PROMPT = f"""
 Your job is to create a single diary entry for a diary conversion pipeline. As an auxilary model, you must only respond with the exact text specified; it will be ingested by a machine for postprocessing. No acknowledgement, no followup questions, no additional formatting. Just the key points. Period.\n
 The verbose entry log you receive will already have been clustered for semantic similarity, so you must do your best to find generalizable diary title encompassing the event activities.\n
 The diary entry must follow a strict format:\n\n
@@ -126,7 +126,22 @@ def update_all(collection, clusters_collection, distance_threshold=1.0):
     
 
 
-def update(collection, clusters_collection, embed_vector, embed_mdata, embed_text, distance_threshold=1.0):
+def update(collection, clusters_collection, embed_vector, embed_mdata, embed_text, distance_threshold=1.0) -> None:
+    """
+    Makes an incremental change to the vector storage by adding a single text embed to the event embed collection. 
+    Also potentially redefines the clusters by either adding a new centroid or merging centroids.
+    
+    Args:
+        collection (chromadb.Collection): The event embed collection to update.
+        clusters_collection (chromadb.Collection): The cluster centroid collection to update.
+        embed_vector (np.ndarray or list): The embedding vector of the new text.
+        embed_mdata (dict): Metadata associated with the new text.
+        embed_text (str): The text to be embedded and stored.
+        distance_threshold (float, optional): The distance threshold for assigning a cluster. Defaults to 1.0.
+        
+    Returns:
+        None
+    """
     new_id = str(uuid4()) # generate unique identifier
     existing_clusters = clusters_collection.get(include=['embeddings'])
     assigned_cluster_id = -1
@@ -264,25 +279,40 @@ def get_journal_timeframe(event_mdata):
     return journal_timeframe
         
 
-def generate_diary(collection):
+def generate_diary(collection) -> None:
+    """
+    Generates a diary consisting of human-readable logs of different predicted workflows of the user, 
+    the time spent, the main sources, and the predicted intent of the activity performed in this workflow.
+    Saves the generated diary to a markdown file.
+    
+    Args:
+        collection (chromadb.Collection): The event embed collection to use for generating the diary.
+    Returns:
+        None
+    """
+    
+    # reshape the events into groups by associated cluster id
     grouped_mdata = get_cluster_event_mdata(collection)
     
     texts = []
     for mdata_list in grouped_mdata.values():
+        # collect formatted text of event timeline of all events in a specific cluster
         entry_events_text = get_verbose_event_logs(mdata_list)
+        # get formatted and computed timeframe of events in the cluster
         entry_timeframe = get_journal_timeframe(mdata_list)
-        entry_content = ask_llm(f"{EVENTS_PROMPT}\n\nVerbose Event Logs:\n{entry_events_text}\n")
-        
+        # request journal entry content from model and add it to the rest of the entries
+        entry_content = ask_llm(f"{PROMPT}\n\nVerbose Event Logs:\n{entry_events_text}\n")
         entry_text = f"{entry_timeframe}\n{entry_content}"
-        print(entry_text)
         texts.append(entry_text)
         
-    with open("journal.txt", "w") as f:
+    # write to markdown file
+    with open(JOURNAL_PATH, "w") as f:
         sep = f"\n\n{'-'*20}\n\n"
         f.write(sep.join(texts))
         print("Journal successfully saved")
     
 
+# this is mostly for debugging but is still useful for demo
 def get_clustering_info(collection):
     print("\n--- Cluster Summary ---")
     results = collection.get(include=['metadatas'])
